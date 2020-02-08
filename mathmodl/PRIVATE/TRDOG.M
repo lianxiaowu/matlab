@@ -1,0 +1,225 @@
+function[s,snod,qpval,posdef,pcgit,Z] = trdog(x,g,H,fdata,D,delta,dv,...
+   mtxmpy,pcmtx,pcoptions,tol,kmax,theta,l,u,Z,dnewt,preconflag);
+%TRDOG Reflected (2-D) trust region trial step (box constraints)
+%
+% [s,snod,qpval,posdef,pcgit,Z] = TRDOG(x,g,H,fdata,D,delta,dv,...
+%                 mtxmpy,pcmtx,pcoptions,tol,theta,l,u,Z,dnewt,preconflag);
+%
+%   Determine the trial step `s', an approx. trust region solution.
+%   `s' is chosen as the best of 3 steps: the scaled gradient
+%   (truncated to  maintain strict feasibility),
+%   a 2-D trust region solution (truncated to remain strictly feas.),
+%   and the reflection of the 2-D trust region solution,
+%   (truncated to remain strictly feasible).
+%
+%   The 2-D subspace (defining the trust region
+%   problem) is defined by the scaled gradient
+%   direction and a CG process (returning
+%   either an approximate Newton step of a dirn of negative curvature.
+%   See ?? for more detail. 
+%   Driver function is SFMIN
+
+%   Copyright (c) 1990-98 by The MathWorks, Inc.
+%   $Revision: 1.5 $  $Date: 1998/09/15 22:43:40 $
+
+% Initialization
+n = length(g);  
+pcgit = 0; 
+grad = D*g;
+DM = D; 
+DG = sparse(1:n,1:n,full(abs(g).*dv));
+posdef = 1; 
+pcgit = 0; 
+tol2 = sqrt(eps);
+v1 = dnewt; 
+qpval1 = inf; 
+qpval2 = inf; 
+qpval3 = inf;
+
+% DETERMINE A 2-DIMENSIONAL SUBSPACE
+if isempty(Z)
+   if isempty(v1)
+      switch preconflag
+      case 'hessprecon'
+         HH = DM*H*DM + DG;
+         [R,permR] = feval(pcmtx,HH,pcoptions);
+      case 'jacobprecon'
+         [R,permR] = feval(pcmtx,DM,DG,H,pcoptions);
+      otherwise
+         error('Invalid string used for PRECONFLAG argument to TRDOG');
+      end
+      % We now pass kmax in from calling function
+      %kmax = max(1,floor(n/2));
+      if tol <= 0, 
+         tol = .1; 
+      end 
+      [v1,posdef,pcgit] = pcgr(DM,DG,grad,kmax,tol,mtxmpy,fdata,H,R,permR);
+   end
+   if norm(v1) > 0
+      v1 = v1/norm(v1);
+   end
+   Z(:,1) = v1;
+   if n > 1
+      if (posdef < 1)
+         v2 = D*sign(grad); 
+         if norm(v2) > 0
+            v2 = v2/norm(v2);
+         end
+         v2 = v2 - v1*(v1'*v2); 
+         nrmv2 = norm(v2);
+         if nrmv2 > tol2
+            v2 = v2/nrmv2; 
+            Z(:,2) = v2;
+         end
+      else
+         if norm(grad) > 0
+            v2 = grad/norm(grad);
+         else
+            v2 = grad;
+         end
+         v2 = v2 - v1*(v1'*v2); 
+         nrmv2 = norm(v2);
+         if nrmv2 > tol2
+            v2 = v2/nrmv2; 
+            Z(:,2) = v2; 
+         end
+      end
+   end
+end
+
+%  REDUCE TO THE CHOSEN SUBSPACE
+W = DM*Z;  
+WW = feval(mtxmpy,W,H,fdata); 
+W = DM*WW;
+MM = full(Z'*W + Z'*DG*Z); 
+rhs=full(Z'*grad);
+
+%  Determine 2-D TR soln
+[st,qpval,po,fcnt,lambda] = trust(rhs,MM,delta);
+ss = Z*st;  
+s = abs(diag(D)).*ss; 
+s = full(s); 
+ssave = s;
+sssave = ss; 
+stsave = st;
+
+% Truncate the TR solution?
+arg = (abs(s) > 0);
+if isnan(s)
+   error('Trust region step contains NaN''s.')
+end
+% No truncation if s is zero length
+if isempty(find(arg))   
+   alpha = 1;
+else
+   mdis = inf;
+   dis = max((u(arg)-x(arg))./s(arg), (l(arg)-x(arg))./s(arg));
+   [mmdis,ipt] = min(dis);  
+   mdis = theta*mmdis;
+   alpha = min(1,mdis);
+end
+s = alpha*s; 
+st = alpha*st; 
+ss = full(alpha*ss);
+qpval1 = rhs'*st + (.5*st)'*MM*st;
+if n > 1 
+   %   Evaluate along the reflected direction?
+   qpval3 = inf; 
+   ssssave = mmdis*sssave;
+   if norm(ssssave) < .9*delta
+      r = mmdis*ssave; 
+      ns = ssave; 
+      ns(ipt) = -ns(ipt); 
+      nx = x+r;
+      stsave = mmdis*stsave;
+      qpval0 = rhs'*stsave + (.5*stsave)'*MM*stsave;
+      ng = feval(mtxmpy,r,H,fdata); 
+      ng = ng + g; 
+      ngrad = D*ng;
+      ngrad = ngrad + DG*ssssave;
+      
+      %      nss is the reflected direction
+      nss = sssave; 
+      nss(ipt) = -nss(ipt); 
+      ZZ(:,1) = nss/norm(nss);
+      W = DM*ZZ; 
+      WW = feval(mtxmpy,W,H,fdata); 
+      W = DM*WW;
+      MM = full(ZZ'*W + ZZ'*DG*ZZ);
+      nrhs=full(ZZ'*ngrad);
+      [nss,tau] = quad1d(nss,ssssave,delta); 
+      nst = tau/norm(nss);
+      ns = abs(diag(D)).*nss; 
+      ns = full(ns);
+      
+      %      Truncate the reflected direction?
+      arg = (abs(ns) > 0); 
+      if isnan(ns)
+         error('Reflected trust region step contains NaN''s.')
+      end
+      % No truncation if s is zero length
+      if isempty(find(arg))   
+         alpha = 1;
+      else
+         mdis = inf;
+         dis = max((u(arg)-nx(arg))./ns(arg), (l(arg)-nx(arg))./ns(arg));
+         mdis = min(dis);  
+         mdis = theta*mdis;
+         alpha = min(1,mdis); 
+      end
+      ns = alpha*ns; 
+      nst = alpha*nst; 
+      nss = full(alpha*nss);
+      qpval3 = qpval0 +  nrhs'*nst + (.5*nst)'*MM*nst;
+   end
+   
+   %   Evaluate along gradient direction
+   ZZ(:,1) = grad/norm(grad);
+   W = DM*ZZ; 
+   WW = feval(mtxmpy,W,H,fdata); 
+   W = DM*WW;
+   MM = full(ZZ'*W + ZZ'*DG*ZZ); 
+   rhs=full(ZZ'*grad);
+   [st,qpval,po,fcnt,lambda] = trust(rhs,MM,delta);
+   ssg = ZZ*st; 
+   sg = abs(diag(D)).*ssg; 
+   sg = full(sg);
+   
+   %   Truncate the gradient direction?
+   arg = (abs(sg) > 0); 
+   if isnan(arg)
+      % No truncation if s is zero length
+      error('Gradient step contains NaN''s.')
+   end
+   if  isempty(find(arg))   
+      alpha = 1;
+   else
+      mdis = inf;
+      dis = max((u(arg)-x(arg))./sg(arg), (l(arg)-x(arg))./sg(arg));
+      mdis = min(dis); 
+      mdis = theta*mdis;
+      alpha = min(1,mdis); 
+   end
+   sg = alpha*sg; 
+   st = alpha*st; 
+   ssg = full(alpha*ssg);
+   qpval2 = rhs'*st + (.5*st)'*MM*st;
+end
+
+% Choose the best of s, sg, ns.
+if qpval2 <= min(qpval1,qpval3)
+   qpval = qpval2; 
+   s = sg; 
+   snod = ssg;
+elseif qpval1 <= min(qpval2,qpval3)
+   qpval = qpval1; 
+   snod = ss;
+else
+   qpval = qpval3; 
+   s = ns + r; 
+   snod = nss + ssssave;
+end
+
+
+
+
